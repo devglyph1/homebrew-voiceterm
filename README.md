@@ -96,8 +96,7 @@ Once your Homebrew tap is published, install **voiceterm** easily:
 
 **Step 1: Tap the repository**
 ```bash
-# Replace YOUR_USERNAME with your GitHub username
-brew tap YOUR_USERNAME/voiceterm
+brew tap devglyph1/voiceterm
 ```
 
 **Step 2: Install the tool**
