@@ -10,136 +10,165 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/briandowns/spinner"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
-
-// Global variable to hold the OpenAI API Key.
-var apiKey string
 
 // rootCmd represents the base command when called without any subcommands.
 var rootCmd = &cobra.Command{
 	Use:   "voiceterm",
-	Short: "A voice-powered AI terminal assistant",
-	Long: `VoiceTerm listens to your voice commands, converts them to text,
-and uses OpenAI to generate and execute the corresponding shell commands.
-
-Example:
-Run 'voiceterm', wait for the prompt, and say:
-"Save all my changes, commit them with the message initial commit, and push to the main branch."`,
+	Short: "A voice-controlled AI terminal assistant",
+	Long: `VoiceTerm AI listens to your voice commands, converts them to text,
+generates the appropriate shell command using OpenAI, and executes it for you.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		runVoiceTerm()
+		// --- Color and Style setup ---
+		infoColor := color.New(color.FgCyan).SprintFunc()
+		promptColor := color.New(color.FgYellow).SprintFunc()
+		errorColor := color.New(color.FgRed).SprintFunc()
+		commandColor := color.New(color.FgGreen).Add(color.Bold).SprintFunc()
+		recordingColor := color.New(color.FgRed).SprintFunc()
+		executingColor := color.New(color.FgMagenta).SprintFunc()
+		// --- End of setup ---
+
+		apiKey := os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			fmt.Println(errorColor("Error: OPENAI_API_KEY environment variable not set."))
+			os.Exit(1)
+		}
+
+		tempFile := "voice_command.wav"
+		defer os.Remove(tempFile) // Clean up the audio file
+
+		// --- Recording with Spinner and Colors ---
+		s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+		s.Suffix = recordingColor(" 🎤 Recording audio... (Press Ctrl+C to stop)")
+		s.Start()
+
+		err := recordAudio(tempFile)
+		s.Stop()
+		fmt.Println("\r" + infoColor("✅ Audio recording stopped.")) // Use \r to overwrite spinner line
+
+		if err != nil {
+			fmt.Println(errorColor("⚠️ Error recording audio: "), err)
+			return
+		}
+
+		// --- Transcribing with Spinner ---
+		s.Suffix = promptColor(" 🧠 Transcribing audio with Whisper...")
+		s.Start()
+		transcribedText, err := transcribeAudio(apiKey, tempFile)
+		s.Stop()
+		if err != nil {
+			fmt.Println(errorColor("\n⚠️ Error transcribing audio: "), err)
+			return
+		}
+		fmt.Println("\r"+infoColor("🗣️ You said:"), transcribedText)
+
+		// --- Generating Command with Spinner ---
+		s.Suffix = promptColor(" 🤖 Generating command with GPT-4o...")
+		s.Start()
+		shellCommand, err := generateCommand(apiKey, transcribedText)
+		s.Stop()
+		if err != nil {
+			fmt.Println(errorColor("\n⚠️ Error generating command: "), err)
+			return
+		}
+
+		// --- Executing Logic with Interactivity and Colors ---
+		for {
+			fmt.Println("\n" + infoColor("✨ Generated Command:"))
+			fmt.Println(commandColor(shellCommand))
+
+			// Check for placeholders like [BRANCH_NAME]
+			re := regexp.MustCompile(`\[(.*?)\]`)
+			placeholders := re.FindAllStringSubmatch(shellCommand, -1)
+
+			if len(placeholders) > 0 {
+				fmt.Println(promptColor("\nThis command requires more information:"))
+				for _, p := range placeholders {
+					placeholder := p[0] // e.g., [BRANCH_NAME]
+					promptText := p[1]  // e.g., BRANCH_NAME
+					fmt.Printf("%s: ", strings.ReplaceAll(promptText, "_", " "))
+					reader := bufio.NewReader(os.Stdin)
+					input, _ := reader.ReadString('\n')
+					shellCommand = strings.Replace(shellCommand, placeholder, strings.TrimSpace(input), 1)
+				}
+				// Loop back to show the filled-in command
+				continue
+			}
+
+			// Confirmation
+			fmt.Print(promptColor("\nExecute this command? (y/n): "))
+			reader := bufio.NewReader(os.Stdin)
+			response, _ := reader.ReadString('\n')
+			response = strings.ToLower(strings.TrimSpace(response))
+
+			if response == "y" || response == "yes" {
+				fmt.Println(executingColor("\n🚀 Executing command..."))
+				executeCommand(shellCommand)
+			} else {
+				fmt.Println(infoColor("Execution cancelled."))
+			}
+			break // Exit loop after execution or cancellation
+		}
 	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
+// This is the main entry point for the command.
 func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
 		os.Exit(1)
 	}
 }
 
-func init() {
-	// Add a persistent flag for the API key. It can be set via command line or environment variable.
-	rootCmd.PersistentFlags().StringVarP(&apiKey, "api-key", "k", "", "OpenAI API key (or use OPENAI_API_KEY env var)")
-}
-
-// Main application logic.
-func runVoiceTerm() {
-	// Check for API key.
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		fmt.Println("Error: OpenAI API key not found.")
-		fmt.Println("Please set it using the --api-key flag or the OPENAI_API_KEY environment variable.")
-		return
-	}
-
-	fmt.Println("🎤 Press Enter to start recording, press Enter again to stop...")
-	bufio.NewReader(os.Stdin).ReadBytes('\n') // Wait for user to press Enter to start
-
-	// --- 1. Record Audio ---
-	// We use the 'rec' command from SoX. It's a reliable cross-platform audio recorder.
-	// The command records a WAV file and automatically stops on silence.
-	audioFilePath := "command.wav"
-	// Ensure SoX is installed.
+// recordAudio uses SoX to record audio from the microphone and stops on Ctrl+C.
+func recordAudio(filePath string) error {
 	if _, err := exec.LookPath("rec"); err != nil {
-		fmt.Println("Error: SoX is not installed. Please install it to use this tool.")
-		fmt.Println("On macOS: brew install sox")
-		fmt.Println("On Debian/Ubuntu: sudo apt-get install sox")
-		return
+		return fmt.Errorf("SoX is not installed. Please install it to use this tool (e.g., on macOS: 'brew install sox')")
 	}
 
-	fmt.Println("🔴 Recording... Press Enter to stop.")
+	// Command to record a WAV file: 'rec -c 1 -r 16000 -V1 voice_command.wav silence 1 0.1 3% 1 3.0 3%'
+	// This will start recording and stop after 3 seconds of silence.
+	// For manual stop, we handle signals.
+	cmd := exec.Command("rec", "-c", "1", "-r", "16000", "-V1", filePath)
 
-	// Start recording in a goroutine
-	recCmd := exec.Command("rec", "-c", "1", "-r", "16000", audioFilePath)
-	if err := recCmd.Start(); err != nil {
-		fmt.Printf("Error starting recording: %v\n", err)
-		return
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("could not start recording: %w", err)
 	}
 
-	// Wait for user to press Enter to stop
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
-	if err := recCmd.Process.Signal(os.Interrupt); err != nil { // Send interrupt to stop rec gracefully
-		fmt.Printf("Error stopping recording: %v\n", err)
-		return
-	}
-	recCmd.Wait() // Wait for the process to exit
-	fmt.Println("✅ Recording finished.")
-	defer os.Remove(audioFilePath) // Clean up the audio file afterwards.
+	// This goroutine will wait for the command to finish, which it will if SoX detects silence.
+	// Or it will wait for the interrupt signal.
+	go func() {
+		<-sigs
+		cmd.Process.Signal(os.Interrupt)
+	}()
 
-	// --- 2. Transcribe Audio to Text (using OpenAI Whisper) ---
-	fmt.Println("🤖 Transcribing audio to text...")
-	transcribedText, err := transcribeAudio(audioFilePath)
-	if err != nil {
-		fmt.Printf("Error transcribing audio: %v\n", err)
-		return
-	}
-	fmt.Printf("🗣️ You said: \"%s\"\n", transcribedText)
-
-	// --- 3. Convert Text to Shell Commands (using OpenAI Chat API) ---
-	fmt.Println("🧠 Generating shell commands...")
-	commands, err := generateCommands(transcribedText)
-	if err != nil {
-		fmt.Printf("Error generating commands: %v\n", err)
-		return
-	}
-
-	if len(commands) == 0 || (len(commands) == 1 && commands[0] == "") {
-		fmt.Println("🤷 No commands were generated. Please try a different phrase.")
-		return
-	}
-
-	fmt.Println("💻 Generated Commands:")
-	for _, c := range commands {
-		fmt.Printf("- %s\n", c)
-	}
-	fmt.Println("---------------------------------")
-
-	// --- 4. Execute Commands (with interactive prompts for placeholders) ---
-	executeCommands(commands)
+	return cmd.Wait()
 }
 
 // transcribeAudio sends the recorded audio file to OpenAI's Whisper API.
-func transcribeAudio(filePath string) (string, error) {
-	// Create a buffer to store our request body
+func transcribeAudio(apiKey, filePath string) (string, error) {
 	var requestBody bytes.Buffer
 	writer := multipart.NewWriter(&requestBody)
 
-	// Open the audio file
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("opening file: %w", err)
 	}
 	defer file.Close()
 
-	// Create a form file field
 	part, err := writer.CreateFormFile("file", filePath)
 	if err != nil {
 		return "", fmt.Errorf("creating form file: %w", err)
@@ -149,16 +178,10 @@ func transcribeAudio(filePath string) (string, error) {
 		return "", fmt.Errorf("copying file to form: %w", err)
 	}
 
-	// Add the model field
 	writer.WriteField("model", "whisper-1")
-
-	// Add the language field to ensure English transcription
 	writer.WriteField("language", "en")
-
-	// Close the writer
 	writer.Close()
 
-	// Create the HTTP request
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", &requestBody)
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
@@ -166,7 +189,6 @@ func transcribeAudio(filePath string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Send the request
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -174,13 +196,11 @@ func transcribeAudio(filePath string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	// Check for errors
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Decode the JSON response
 	var result struct {
 		Text string `json:"text"`
 	}
@@ -191,12 +211,12 @@ func transcribeAudio(filePath string) (string, error) {
 	return result.Text, nil
 }
 
-// generateCommands sends the transcribed text to OpenAI's Chat API to get shell commands.
-func generateCommands(prompt string) ([]string, error) {
-	systemPrompt := `You are an expert shell command assistant. Convert the user's natural language request into a sequence of shell commands.
-- Each command must be on a new line.
+// generateCommand sends the transcribed text to OpenAI's Chat API to get a shell command.
+func generateCommand(apiKey, prompt string) (string, error) {
+	systemPrompt := `You are an expert shell command assistant. Convert the user's natural language request into a single, executable shell command line.
+- If multiple steps are required, chain them together with '&&' or pipes '|'.
 - If a piece of information is missing (like a branch name, file name, or commit message), use a placeholder in the format [DESCRIPTION_OF_MISSING_INFO].
-- Do not add any explanation, conversational text, or markdown formatting. Only output the raw commands.`
+- Do not add any explanation, conversational text, or markdown formatting. Only output the raw command.`
 
 	payload := map[string]interface{}{
 		"model": "gpt-4o",
@@ -209,12 +229,12 @@ func generateCommands(prompt string) ([]string, error) {
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling payload: %w", err)
+		return "", fmt.Errorf("marshalling payload: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(payloadBytes))
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -222,13 +242,13 @@ func generateCommands(prompt string) ([]string, error) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("sending request: %w", err)
+		return "", fmt.Errorf("sending request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var result struct {
@@ -240,67 +260,34 @@ func generateCommands(prompt string) ([]string, error) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding JSON response: %w", err)
+		return "", fmt.Errorf("decoding JSON response: %w", err)
 	}
 
 	if len(result.Choices) == 0 {
-		return nil, fmt.Errorf("no response from OpenAI")
+		return "", fmt.Errorf("no response from OpenAI")
 	}
 
 	commandString := result.Choices[0].Message.Content
-	// Clean up potential markdown code blocks
-	commandString = strings.TrimPrefix(commandString, "```bash\n")
-	commandString = strings.TrimPrefix(commandString, "```sh\n")
-	commandString = strings.TrimPrefix(commandString, "```\n")
-	commandString = strings.TrimSuffix(commandString, "\n```")
+	commandString = strings.TrimSpace(commandString)
+	commandString = strings.TrimPrefix(commandString, "```bash")
+	commandString = strings.TrimPrefix(commandString, "```sh")
+	commandString = strings.TrimPrefix(commandString, "```")
+	commandString = strings.TrimSuffix(commandString, "```")
 	commandString = strings.TrimSpace(commandString)
 
-	return strings.Split(commandString, "\n"), nil
+	return commandString, nil
 }
 
-// executeCommands runs the generated commands, prompting for placeholders if necessary.
-func executeCommands(commands []string) {
-	// Regex to find placeholders like [some text]
-	re := regexp.MustCompile(`\[(.*?)\]`)
-	reader := bufio.NewReader(os.Stdin)
+// executeCommand runs the final command string.
+func executeCommand(command string) {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
 
-	for _, command := range commands {
-		finalCommand := command
-		// Find all placeholders in the current command
-		placeholders := re.FindAllStringSubmatch(finalCommand, -1)
-
-		for _, placeholder := range placeholders {
-			// placeholder[0] is the full match, e.g., "[BRANCH_NAME]"
-			// placeholder[1] is the group, e.g., "BRANCH_NAME"
-			promptText := strings.ReplaceAll(placeholder[1], "_", " ")
-			fmt.Printf("❓ Please provide %s: ", promptText)
-
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(input)
-
-			// Replace the first occurrence of the placeholder with the user's input
-			finalCommand = strings.Replace(finalCommand, placeholder[0], input, 1)
-		}
-
-		fmt.Printf("🚀 Executing: %s\n", finalCommand)
-
-		// Execute the command using sh -c to handle pipes, etc.
-		cmd := exec.Command("sh", "-c", finalCommand)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin // Pass through stdin for commands that might need it
-
-		err := cmd.Run()
-		if err != nil {
-			fmt.Printf("❌ Error executing command: %v\n", err)
-			// Ask the user if they want to continue
-			fmt.Print("Do you want to continue with the next command? (y/N): ")
-			choice, _ := reader.ReadString('\n')
-			if strings.TrimSpace(strings.ToLower(choice)) != "y" {
-				fmt.Println("Aborting.")
-				return
-			}
-		}
+	err := cmd.Run()
+	if err != nil {
+		errorColor := color.New(color.FgRed).SprintFunc()
+		fmt.Println(errorColor("\n⚠️ Error executing command: "), err)
 	}
-	fmt.Println("🎉 All commands executed successfully!")
 }
