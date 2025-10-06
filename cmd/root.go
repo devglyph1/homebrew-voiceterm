@@ -152,6 +152,9 @@ func transcribeAudio(filePath string) (string, error) {
 	// Add the model field
 	writer.WriteField("model", "whisper-1")
 
+	// Add the language field to ensure English transcription
+	writer.WriteField("language", "en")
+
 	// Close the writer
 	writer.Close()
 
