@@ -10,10 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -35,6 +33,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 		commandColor := color.New(color.FgGreen).Add(color.Bold).SprintFunc()
 		recordingColor := color.New(color.FgRed).SprintFunc()
 		executingColor := color.New(color.FgMagenta).SprintFunc()
+		logoColor := color.New(color.FgHiMagenta, color.Bold).SprintFunc()
 		// --- End of setup ---
 
 		apiKey := os.Getenv("OPENAI_API_KEY")
@@ -43,80 +42,109 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			os.Exit(1)
 		}
 
-		tempFile := "voice_command.wav"
-		defer os.Remove(tempFile) // Clean up the audio file
+		// --- Welcome Message ---
+		fmt.Println(logoColor(`
+ _  _   __  __  ___  ____  ____  ____  ____  _  _ 
+/ )( \ /  \(  )/ __)(  __)(_  _)(  __)(  _ \( \/ )
+\ \/ /(  O ))(( (__  ) _)   )(   ) _)  )   // \/ \
+ \__/  \__/(__)\___)(____) (__) (____)(__\_)\_)(_/
+                                                                        
+    `))
+		fmt.Println(infoColor("Welcome to VoiceTerm, your AI smart voice terminal assistant!"))
+		fmt.Println("-----------------------------------------------------------------")
 
-		// --- Recording with Spinner and Colors ---
-		s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-		s.Suffix = recordingColor(" 🎤 Recording audio... (Press Ctrl+C to stop)")
-		s.Start()
-
-		err := recordAudio(tempFile)
-		s.Stop()
-		fmt.Println("\r" + infoColor("✅ Audio recording stopped.")) // Use \r to overwrite spinner line
-
-		if err != nil {
-			fmt.Println(errorColor("⚠️ Error recording audio: "), err)
-			return
-		}
-
-		// --- Transcribing with Spinner ---
-		s.Suffix = promptColor(" 🧠 Transcribing audio with Whisper...")
-		s.Start()
-		transcribedText, err := transcribeAudio(apiKey, tempFile)
-		s.Stop()
-		if err != nil {
-			fmt.Println(errorColor("\n⚠️ Error transcribing audio: "), err)
-			return
-		}
-		fmt.Println("\r"+infoColor("🗣️ You said:"), transcribedText)
-
-		// --- Generating Command with Spinner ---
-		s.Suffix = promptColor(" 🤖 Generating command with GPT-4o...")
-		s.Start()
-		shellCommand, err := generateCommand(apiKey, transcribedText)
-		s.Stop()
-		if err != nil {
-			fmt.Println(errorColor("\n⚠️ Error generating command: "), err)
-			return
-		}
-
-		// --- Executing Logic with Interactivity and Colors ---
+		// --- Main Application Loop ---
 		for {
-			fmt.Println("\n" + infoColor("✨ Generated Command:"))
-			fmt.Println(commandColor(shellCommand))
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print(promptColor("\nPress Enter to start recording (or Ctrl+C to exit)..."))
+			_, err := reader.ReadString('\n')
+			if err != nil { // Handles Ctrl+C (EOF)
+				fmt.Println(infoColor("\nGoodbye!"))
+				return
+			}
 
-			// Check for placeholders like [BRANCH_NAME]
-			re := regexp.MustCompile(`\[(.*?)\]`)
-			placeholders := re.FindAllStringSubmatch(shellCommand, -1)
+			tempFile := "voice_command.wav"
+			defer os.Remove(tempFile) // Clean up the audio file
 
-			if len(placeholders) > 0 {
-				fmt.Println(promptColor("\nThis command requires more information:"))
-				for _, p := range placeholders {
-					placeholder := p[0] // e.g., [BRANCH_NAME]
-					promptText := p[1]  // e.g., BRANCH_NAME
-					fmt.Printf("%s: ", strings.ReplaceAll(promptText, "_", " "))
-					reader := bufio.NewReader(os.Stdin)
-					input, _ := reader.ReadString('\n')
-					shellCommand = strings.Replace(shellCommand, placeholder, strings.TrimSpace(input), 1)
-				}
-				// Loop back to show the filled-in command
+			// --- Recording with Spinner and Colors ---
+			s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+			s.Suffix = recordingColor(" 🎤 Recording... (Press Enter to stop)")
+			s.Start()
+
+			// Check if SoX is installed
+			if _, err := exec.LookPath("rec"); err != nil {
+				s.Stop()
+				fmt.Println(errorColor("Error: SoX is not installed. Please install it to use this tool (e.g., on macOS: 'brew install sox')"))
+				return
+			}
+
+			recCmd := exec.Command("rec", "-c", "1", "-r", "16000", "-V1", tempFile)
+			if err := recCmd.Start(); err != nil {
+				s.Stop()
+				fmt.Println(errorColor("⚠️ Error starting recording: "), err)
 				continue
 			}
 
-			// Confirmation
-			fmt.Print(promptColor("\nExecute this command? (y/n): "))
-			reader := bufio.NewReader(os.Stdin)
-			response, _ := reader.ReadString('\n')
-			response = strings.ToLower(strings.TrimSpace(response))
+			// Goroutine to wait for 'Enter' to stop recording
+			go func() {
+				reader.ReadString('\n')
+				if recCmd.Process != nil {
+					recCmd.Process.Signal(os.Interrupt)
+				}
+			}()
 
-			if response == "y" || response == "yes" {
+			recCmd.Wait() // Wait for the recording process to be interrupted and finish
+			s.Stop()
+			fmt.Println("\r" + infoColor("✅ Audio recording stopped."))
+
+			// --- Transcribing with Spinner ---
+			s.Suffix = promptColor(" 🧠 Transcribing audio with Whisper...")
+			s.Start()
+			transcribedText, err := transcribeAudio(apiKey, tempFile)
+			s.Stop()
+			if err != nil {
+				fmt.Println(errorColor("\n⚠️ Error transcribing audio: "), err)
+				continue
+			}
+			fmt.Println("\r"+infoColor("🗣️ You said:"), transcribedText)
+
+			// --- Generating Command with Spinner ---
+			s.Suffix = promptColor(" 🤖 Generating command with GPT-4o...")
+			s.Start()
+			shellCommand, err := generateCommand(apiKey, transcribedText)
+			s.Stop()
+			if err != nil {
+				fmt.Println(errorColor("\n⚠️ Error generating command: "), err)
+				continue
+			}
+
+			// --- Executing Logic with Interactivity and Colors ---
+			for {
+				fmt.Println("\n" + infoColor("✨ Generated Command:"))
+				fmt.Println(commandColor(shellCommand))
+
+				// Check for placeholders like [BRANCH_NAME]
+				re := regexp.MustCompile(`\[(.*?)\]`)
+				placeholders := re.FindAllStringSubmatch(shellCommand, -1)
+
+				if len(placeholders) > 0 {
+					fmt.Println(promptColor("\nThis command requires more information:"))
+					for _, p := range placeholders {
+						placeholder := p[0] // e.g., [BRANCH_NAME]
+						promptText := p[1]  // e.g., BRANCH_NAME
+						fmt.Printf("%s: ", strings.ReplaceAll(promptText, "_", " "))
+						input, _ := reader.ReadString('\n')
+						shellCommand = strings.Replace(shellCommand, placeholder, strings.TrimSpace(input), 1)
+					}
+					// Loop back to show the filled-in command
+					continue
+				}
+
+				// Directly execute the command
 				fmt.Println(executingColor("\n🚀 Executing command..."))
 				executeCommand(shellCommand)
-			} else {
-				fmt.Println(infoColor("Execution cancelled."))
+				break // Exit inner loop and wait for new recording
 			}
-			break // Exit loop after execution or cancellation
 		}
 	},
 }
@@ -130,34 +158,6 @@ func Execute() {
 	}
 }
 
-// recordAudio uses SoX to record audio from the microphone and stops on Ctrl+C.
-func recordAudio(filePath string) error {
-	if _, err := exec.LookPath("rec"); err != nil {
-		return fmt.Errorf("SoX is not installed. Please install it to use this tool (e.g., on macOS: 'brew install sox')")
-	}
-
-	// Command to record a WAV file: 'rec -c 1 -r 16000 -V1 voice_command.wav silence 1 0.1 3% 1 3.0 3%'
-	// This will start recording and stop after 3 seconds of silence.
-	// For manual stop, we handle signals.
-	cmd := exec.Command("rec", "-c", "1", "-r", "16000", "-V1", filePath)
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("could not start recording: %w", err)
-	}
-
-	// This goroutine will wait for the command to finish, which it will if SoX detects silence.
-	// Or it will wait for the interrupt signal.
-	go func() {
-		<-sigs
-		cmd.Process.Signal(os.Interrupt)
-	}()
-
-	return cmd.Wait()
-}
-
 // transcribeAudio sends the recorded audio file to OpenAI's Whisper API.
 func transcribeAudio(apiKey, filePath string) (string, error) {
 	var requestBody bytes.Buffer
@@ -165,6 +165,10 @@ func transcribeAudio(apiKey, filePath string) (string, error) {
 
 	file, err := os.Open(filePath)
 	if err != nil {
+		// If file doesn't exist, it's likely recording was stopped too fast
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("audio file not found. Recording may have been too short")
+		}
 		return "", fmt.Errorf("opening file: %w", err)
 	}
 	defer file.Close()
@@ -213,6 +217,10 @@ func transcribeAudio(apiKey, filePath string) (string, error) {
 
 // generateCommand sends the transcribed text to OpenAI's Chat API to get a shell command.
 func generateCommand(apiKey, prompt string) (string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return "", fmt.Errorf("no text was transcribed. Cannot generate command")
+	}
+
 	systemPrompt := `You are an expert shell command assistant. Convert the user's natural language request into a single, executable shell command line.
 - If multiple steps are required, chain them together with '&&' or pipes '|'.
 - If a piece of information is missing (like a branch name, file name, or commit message), use a placeholder in the format [DESCRIPTION_OF_MISSING_INFO].
