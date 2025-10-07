@@ -19,6 +19,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var language = "en"
+
 // rootCmd represents the base command when called without any subcommands.
 var rootCmd = &cobra.Command{
 	Use:   "voiceterm",
@@ -64,7 +66,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			}
 
 			tempFile := "voice_command.wav"
-			defer os.Remove(tempFile) // Ensure cleanup of the audio file
+			defer os.Remove(tempFile) //Ensure cleanup
 
 			// --- Recording with Spinner and Colors ---
 			s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
@@ -101,7 +103,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			// --- Transcribing with Spinner ---
 			s.Suffix = promptColor(" 🧠 Transcribing audio with Whisper...")
 			s.Start()
-			transcribedText, err := transcribeAudio(apiKey, tempFile)
+			transcribedText, err := transcribeAudio(apiKey, tempFile, language)
 			s.Stop()
 			if err != nil {
 				fmt.Println(errorColor("\n⚠️ Error transcribing audio: "), err)
@@ -163,8 +165,12 @@ func Execute() {
 	}
 }
 
+func init() {
+	rootCmd.Flags().StringVarP(&language, "language", "l", "", "Optional: Language for transcription (e.g., 'en', 'hi'). Defaults to auto-detection.")
+}
+
 // transcribeAudio sends the recorded audio file to OpenAI's Whisper API.
-func transcribeAudio(apiKey, filePath string) (string, error) {
+func transcribeAudio(apiKey, filePath, lang string) (string, error) {
 	var requestBody bytes.Buffer
 	writer := multipart.NewWriter(&requestBody)
 
@@ -188,7 +194,9 @@ func transcribeAudio(apiKey, filePath string) (string, error) {
 	}
 
 	writer.WriteField("model", "whisper-1")
-	writer.WriteField("language", "en")
+	// Only set the language if the user provides the flag.
+	// Otherwise, let Whisper auto-detect it.
+	writer.WriteField("language", lang)
 	writer.Close()
 
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", &requestBody)
