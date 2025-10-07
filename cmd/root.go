@@ -64,7 +64,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			}
 
 			tempFile := "voice_command.wav"
-			defer os.Remove(tempFile) // Clean up the audio file
+			defer os.Remove(tempFile) // Ensure cleanup of the audio file
 
 			// --- Recording with Spinner and Colors ---
 			s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
@@ -82,6 +82,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			if err := recCmd.Start(); err != nil {
 				s.Stop()
 				fmt.Println(errorColor("⚠️ Error starting recording: "), err)
+				os.Remove(tempFile) // Clean up even on failure
 				continue
 			}
 
@@ -104,6 +105,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			s.Stop()
 			if err != nil {
 				fmt.Println(errorColor("\n⚠️ Error transcribing audio: "), err)
+				os.Remove(tempFile) // Clean up even on failure
 				continue
 			}
 			fmt.Println("\r"+infoColor("🗣️ You said:"), transcribedText)
@@ -115,6 +117,7 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 			s.Stop()
 			if err != nil {
 				fmt.Println(errorColor("\n⚠️ Error generating command: "), err)
+				os.Remove(tempFile) // Clean up even on failure
 				continue
 			}
 
@@ -145,6 +148,8 @@ generates the appropriate shell command using OpenAI, and executes it for you.`,
 				executeCommand(shellCommand)
 				break // Exit inner loop and wait for new recording
 			}
+			// Clean up the audio file at the end of the loop iteration
+			os.Remove(tempFile)
 		}
 	},
 }
