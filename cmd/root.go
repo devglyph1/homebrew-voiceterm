@@ -237,6 +237,7 @@ func generateCommand(apiKey, prompt string) (string, error) {
 	systemPrompt := `You are an expert shell command assistant. Convert the user's natural language request into a single, executable shell command line.
 - If multiple steps are required, chain them together with '&&' or pipes '|'.
 - If a piece of information is missing (like a branch name, file name, or commit message), use a placeholder in the format [DESCRIPTION_OF_MISSING_INFO].
+- The entire generated command, including all arguments like filenames or commit messages or all the other elements of the command, must be in English characters. If the user provides a name in another language (e.g., Hindi), you must transliterate it to English. For example, if the user says "एक टेस्ट नामकी फाइल बनाओ", the output should be "touch test", not "touch टेस्ट".
 - Do not add any explanation, conversational text, or markdown formatting. Only output the raw command.`
 
 	payload := map[string]interface{}{
